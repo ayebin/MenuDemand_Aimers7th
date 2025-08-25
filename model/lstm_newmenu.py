@@ -1,7 +1,4 @@
 import os
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
-os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 import glob, time, random, re
 from tqdm import tqdm
@@ -79,8 +76,8 @@ def smape_ignore_zero(a, p, eps=1e-8):
     return float(np.mean(num / den))
 
 
-# ---------- Availability helpers (causal, no leakage) ----------
-TEMP_PAUSE_THRESHOLD = 14  # 출시 후 연속 0이 이 이상이면 일시중단으로 간주
+# ---------- Availability helpers ----------
+TEMP_PAUSE_THRESHOLD = 14 
 
 def _runlen_ones(arr: np.ndarray) -> np.ndarray:
     """arr: 0/1 array -> 현재 위치까지의 '연속 1 길이'"""
@@ -102,22 +99,18 @@ def add_causal_availability_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.sort_values(["영업장명_메뉴명","영업일자"]).reset_index(drop=True)
 
-    # 이전날 기준 양(>0) 판매 여부
     pos_lag1 = df.groupby("영업장명_메뉴명")["매출수량"].shift(1).fillna(0) > 0
     pos_lag1 = pos_lag1.astype(int)
 
-    # 누적 양성 발생 여부(ever positive before today)
     cum_pos_before = pos_lag1.groupby(df["영업장명_메뉴명"]).cumsum()
     df["is_available_causal"] = (cum_pos_before > 0).astype(int)
 
-    # 일시중단: 출시 후(가용=1) 구간에서 '이전까지' 연속 0 run 길이 계산
     zero_lag1 = (df.groupby("영업장명_메뉴명")["매출수량"].shift(1).fillna(0) <= 0).astype(int)
     zero_run_lag = zero_lag1.groupby(df["영업장명_메뉴명"]).transform(
         lambda s: pd.Series(_runlen_ones(s.to_numpy()), index=s.index)
     )
     df["is_temp_paused_causal"] = ((df["is_available_causal"] == 1) & (zero_run_lag >= TEMP_PAUSE_THRESHOLD)).astype(int)
 
-    # 직전 7일(오늘 제외) ANY 양성
     rolling_any7 = pos_lag1.groupby(df["영업장명_메뉴명"]).rolling(7, min_periods=1).max()
     df["is_selling_7_causal"] = rolling_any7.reset_index(level=0, drop=True).fillna(0).astype(int)
 
@@ -141,13 +134,11 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values(["영업장명_메뉴명","영업일자"]).reset_index(drop=True)
     df["매출수량"] = pd.to_numeric(df["매출수량"], errors="coerce").fillna(0).clip(lower=0)
 
-    # 캘린더 파생
     df["월"] = df["영업일자"].dt.month
     df["요일"] = df["영업일자"].dt.weekday
     df["day_of_year"] = df["영업일자"].dt.dayofyear
     df["season_id"] = df["월"].apply(month_to_season).astype(int)
 
-    # (5) doy 고조 성분 추가
     df["doy_sin"] = np.sin(2*np.pi*(df["day_of_year"]-1)/365.0)
     df["doy_cos"] = np.cos(2*np.pi*(df["day_of_year"]-1)/365.0)
     for k in [2, 3]:
@@ -158,7 +149,6 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["is_summer_peak"] = df["월"].isin([7,8]).astype(int)
     df["is_winter_peak"] = df["월"].isin([12,1,2]).astype(int)
 
-    # 공휴일 flag
     start_year = int(df["영업일자"].min().year)-1
     end_year   = int(df["영업일자"].max().year)+1
     kr_holidays = holidays.KR(years=range(start_year, end_year+1), observed=True)
@@ -168,7 +158,6 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["is_day_before_holiday"] = (d + pd.Timedelta(days=1)).isin(holi_idx).astype(int)
     df["is_day_after_holiday"]  = (d - pd.Timedelta(days=1)).isin(holi_idx).astype(int)
 
-    # 라그/롤링(누수방지 shift(1))
     grp = df.groupby("영업장명_메뉴명")["매출수량"]
     df["sales_lag_1"] = grp.shift(1).fillna(0)
     df["sales_rolling_mean_7"]  = grp.shift(1).rolling(7,  min_periods=1).mean().reset_index(level=0, drop=True).fillna(0)
@@ -178,7 +167,6 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["rolling_std_14"] = grp.shift(1).rolling(14, min_periods=2).std().reset_index(level=0, drop=True).fillna(0)
     df["rolling_std_28"] = grp.shift(1).rolling(28, min_periods=2).std().reset_index(level=0, drop=True).fillna(0)
 
-    # 전월 평균
     df["월시작"] = df["영업일자"].values.astype("datetime64[M]")
     vym = (df.groupby(["업장명","메뉴명","월시작"], as_index=False)["매출수량"].mean()
              .rename(columns={"매출수량":"월평균"}))
@@ -196,7 +184,6 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     r28 = grp.shift(1).rolling(28, min_periods=1).mean().reset_index(level=0, drop=True)
     df["recent_momentum"] = (r7 - r28).fillna(0).astype(float)
 
-    # seasonal rule flag
     special_winter = {"포레스트릿", "카페테리아"}
     special_spring_fall = {"화담숲주막", "화담숲카페"}
     always_zero = {"담하", "미라시아", "느티나무", "연회장", "라그로타"}
@@ -209,14 +196,12 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
         _seasonal_flag(s, m) for s, m in zip(df["업장명"].astype(str), df["월"].astype(int))
     ]
 
-    # 마지막 양의 판매 이후 경과일 (causal)
     df = df.sort_values(["업장명","메뉴명","영업일자"]).reset_index(drop=True)
     df["_pos_date"] = df["영업일자"].where(df["매출수량"] > 0)
     df["last_pos_date"] = df.groupby(["업장명","메뉴명"])["_pos_date"].transform('ffill')
     df["days_since_last_pos_sale"] = (df["영업일자"] - df["last_pos_date"]).dt.days.fillna(9999).astype(int)
     df.drop(columns=["_pos_date","last_pos_date"], inplace=True)
 
-    # rolling zero-rate
     df["is_zero"] = (df["매출수량"] <= 0).astype(int)
     zgrp = df.groupby("영업장명_메뉴명")["is_zero"]
     df["zero_rate_7"]  = zgrp.shift(1).rolling(7,  min_periods=1).mean().reset_index(level=0, drop=True).fillna(0)
@@ -224,7 +209,6 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["zero_rate_28"] = zgrp.shift(1).rolling(28, min_periods=1).mean().reset_index(level=0, drop=True).fillna(0)
     df.drop(columns=["is_zero"], inplace=True)
 
-    # --- 신규: 판매 가능/일시중단/최근판매(7d) - 전부 causal ---
     df = add_causal_availability_features(df)
 
     for c in ['is_weekend','is_holiday','is_day_before_holiday','is_day_after_holiday',
@@ -234,7 +218,6 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-# 시계열 배치 데이터 (X)에 대해 윈도우 단위 로컬 스케일링 -> median/IQR 정규화
 def local_scale_window(X, feature_names, cols_to_scale):
     X = X.copy()
     idx = [feature_names.index(c) for c in cols_to_scale if c in feature_names]
@@ -356,7 +339,7 @@ class HurdleLSTMFC(nn.Module):
         h = self.step_mlp(z)
         logits = self.out_zero(h)
         p = torch.sigmoid(logits * self.logit_temp).view(B, Hh)
-        qy = self.out_qty(h).view(B, Hh)   # log1p scale
+        qy = self.out_qty(h).view(B, Hh)  
         return p, qy
 
 
@@ -368,7 +351,7 @@ def focal_bce_elementwise(pred, target, gamma=1.0, alpha=0.75, eps=1e-7):
     return bce * ((1-pt)**gamma)
 
 
-# ---------- NEW: metric & postprocess tuning ----------
+# ---------- metric & postprocess tuning ----------
 def _comp_smape(a, p, eps=1e-8):
     a = np.asarray(a, float); p = np.asarray(p, float)
     m = (a != 0)
@@ -392,7 +375,6 @@ def competition_score(df, store_weights=None):
     return float((scores*wts).sum()/wts.sum())
 
 def apply_theta_eps(df, theta, eps, pcol='p_eff', qcol='q'):
-    # 안전 가드: theta/eps가 None이면 변경 없이 반환
     if theta is None or eps is None:
         out = df.copy()
         out['P'] = out.get('P', out[qcol].astype(float)).astype(float)
@@ -416,7 +398,7 @@ def tune_theta_eps_per_store(val_df, thetas=None, floors=None, store_weights=Non
                     store_weights={s:1.0}
                 )
                 if not np.isfinite(sc):
-                    continue  # NaN/inf는 스킵
+                    continue 
                 if sc < best[2]:
                     best = (float(th), float(eps), float(sc))
         theta, eps, best_sc = best
@@ -429,8 +411,6 @@ def tune_theta_eps_per_store(val_df, thetas=None, floors=None, store_weights=Non
     total_sc = competition_score(val_tuned[['restaurant','item','date','A','P']], store_weights)
     return val_tuned, params, float(total_sc) if np.isfinite(total_sc) else np.inf
 
-
-# ------ (3) 추가: Platt 온도 보정 + store×item θ/ε ------
 def _logit(p, eps=1e-6):
     p = np.clip(p, eps, 1 - eps)
     return np.log(p / (1 - p))
@@ -464,7 +444,6 @@ def tune_theta_eps_per_store_item(val_df, thetas=None, floors=None, store_weight
     params_si = {}; outs = []
     covered_idx = set()
 
-    # 1) store×item 우선
     for (s, it), g in val_df.groupby(['restaurant', 'item'], sort=False):
         if len(g) < min_rows:
             continue
@@ -476,7 +455,7 @@ def tune_theta_eps_per_store_item(val_df, thetas=None, floors=None, store_weight
                     store_weights={s:1.0}
                 )
                 if not np.isfinite(sc):
-                    continue  # NaN/inf는 스킵
+                    continue 
                 if sc < best[2]:
                     best = (float(th), float(eps), float(sc))
         theta, eps, best_sc = best
@@ -487,7 +466,6 @@ def tune_theta_eps_per_store_item(val_df, thetas=None, floors=None, store_weight
         params_si[(s, it)] = {'theta': theta, 'eps': eps}
         covered_idx.update(g.index.tolist())
 
-    # 2) fallback: 스토어 단위 (아직 미적용 row에 대해)
     rem_idx = sorted(set(val_df.index) - covered_idx)
     if rem_idx:
         rem = val_df.loc[rem_idx].copy()
@@ -542,7 +520,6 @@ def train_full_and_pack(train_path: str):
     df = pd.read_csv(train_path)
     df = build_features(df)
 
-    # 날짜 경계
     last_dt  = pd.to_datetime(df["영업일자"]).max()
     val_start= last_dt - pd.Timedelta(days=VAL_DAYS-1)
     val_end  = last_dt
@@ -550,19 +527,15 @@ def train_full_and_pack(train_path: str):
         print("TRAIN_FULL=True: 전체 기간으로 학습 (검증/얼리스톱 없음)")
     else:
         print(f"Validation window: {val_start.date()} - {val_end.date()}")
-
-    # caps 계산용: 반드시 로그/스케일 전 원시 스케일에서 계산
+        
     if TRAIN_FULL:
-        # 전체 기간으로 cap 계산
         caps_source = df[['업장명','메뉴명','영업일자','매출수량']].copy()
         caps_map = compute_caps_from_train(caps_source, q=CAP_Q)
     else:
-        # 검증창 이전 데이터만 사용
         caps_source = df[['업장명','메뉴명','영업일자','매출수량']].copy()
         caps_train_only = caps_source[caps_source['영업일자'] < val_start]
         caps_map = compute_caps_from_train(caps_train_only, q=CAP_Q)
 
-    # 학습에 쓰일 특징
     features = [
         '매출수량',
         'sales_lag_1','sales_rolling_mean_7','sales_rolling_mean_14',
@@ -570,26 +543,23 @@ def train_full_and_pack(train_path: str):
         'avg_sales_prev_month',
         'is_weekend','is_holiday','is_day_before_holiday','is_day_after_holiday',
         'is_summer_peak','is_winter_peak',
-        'doy_sin','doy_cos','doy_sin_2','doy_cos_2','doy_sin_3','doy_cos_3',  # (5) 추가된 고조 성분
+        'doy_sin','doy_cos','doy_sin_2','doy_cos_2','doy_sin_3','doy_cos_3',  
         'seasonal_weight_flag',
         'days_since_last_pos_sale',
         'recent_momentum',
         'zero_rate_7','zero_rate_14','zero_rate_28',
-        # NEW causal availability features
         'is_available_causal','is_temp_paused_causal','is_selling_7_causal',
     ]
     for c in features:
         if c not in df.columns: df[c] = 0
     df[features] = df[features].replace([np.inf,-np.inf],0).fillna(0)
 
-    # 로그 스케일
     log_cols = [
         '매출수량','sales_lag_1','sales_rolling_mean_7',
         'sales_rolling_mean_14','sales_rolling_mean_28','avg_sales_prev_month',
     ]
     df[log_cols] = np.log1p(df[log_cols])
 
-    # 스케일
     to_scale = [c for c in features if c != '매출수량']
     x_scaler = MinMaxScaler()
 
@@ -606,7 +576,6 @@ def train_full_and_pack(train_path: str):
         df[to_scale] = x_scaler.fit_transform(df[to_scale])
         data_for_seq = df
 
-    # id 매핑
     stores = ["<UNK_STORE>"] + sorted(df["업장명"].unique().tolist())
     items  = ["<UNK_ITEM>"] + sorted(df["메뉴명"].unique().tolist())
     store2id = {s:i for i,s in enumerate(stores)}
@@ -616,14 +585,12 @@ def train_full_and_pack(train_path: str):
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 시퀀스 생성 
     (Xall,yall,dwall,mnall,seall,fdwall,fnall,fseall,
      favall, fpall, sidall,iidall,fend) = create_sequences_multi(
         data_for_seq, SEQ_LEN, H, features, store2id, item2id
     )
     fend = np.asarray(fend).astype('datetime64[ns]')
 
-    # split mask
     if TRAIN_FULL:
         train_mask = np.ones_like(fend, dtype=bool)
         val_mask   = np.zeros_like(fend, dtype=bool)
@@ -687,7 +654,6 @@ def train_full_and_pack(train_path: str):
             batch_size=BATCH, shuffle=False, num_workers=0
         )
 
-    # 모델
     emb_store = max(4, int(np.ceil(np.log2(len(store2id) + 1))))
     emb_item  = max(8, int(np.ceil(np.log2(len(item2id) + 1))) + 2)
     model = HurdleLSTMFC(
@@ -710,7 +676,6 @@ def train_full_and_pack(train_path: str):
     mirasia_id = store2id.get('미라시아', -1)
     HIGH_WEIGHT = HW
 
-    # ---- 스냅샷 저장용 ----
     state_at_snapshot = None
 
     # ---------------- Train Loop ----------------
@@ -721,7 +686,6 @@ def train_full_and_pack(train_path: str):
             Xn,dw,mn,se,fdw,fmn,fse,fav,fpause,sid,iid,yb = \
                 Xn.to(device),dw.to(device),mn.to(device),se.to(device),fdw.to(device),fmn.to(device),fse.to(device),fav.to(device),fpause.to(device),sid.to(device),iid.to(device),yb.to(device)
 
-            # 스토어 가중치(선호 매장)
             weights_batch = torch.ones(Xn.size(0), device=device)
             mask_hi = ((sid == damha_id) | (sid == mirasia_id))
             weights_batch = torch.where(mask_hi, torch.as_tensor(HIGH_WEIGHT, device=device, dtype=weights_batch.dtype), weights_batch)
@@ -729,23 +693,19 @@ def train_full_and_pack(train_path: str):
             optimizer.zero_grad()
             p_buy, qty_log = model(Xn,dw,mn,se,sid,iid,fdw,fmn,fse)
 
-            # per-step 가중치: 출시 전↓, 일시중단↓
             mask_weight = WEIGHT_PRELAUNCH + (1.0 - WEIGHT_PRELAUNCH) * fav
             mask_weight = mask_weight * torch.where(fpause>0.5, torch.as_tensor(WEIGHT_PAUSED, device=device), torch.as_tensor(1.0, device=device))
 
-            # 분류 손실
             tgt_bin = (yb > 0).float()
             loss_zero_raw = focal_bce_elementwise(p_buy, tgt_bin, gamma=FOCAL_GAMMA, alpha=FOCAL_ALPHA)  # (B,H)
             loss_zero_per = (loss_zero_raw * mask_weight).sum(dim=1) / mask_weight.sum(dim=1).clamp_min(1e-6)
 
-            # 수량 손실 (양성일 때만) + 가중치
             mask_pos = (yb > 0).float()
             qty_raw = huber(qty_log, yb) * mask_pos
             denom_qty = (mask_pos * mask_weight).sum(dim=1).clamp_min(1e-6)
             loss_qty_per = (qty_raw * mask_weight).sum(dim=1) / denom_qty
 
             total_per = LAMBDA_ZERO * loss_zero_per + LAMBDA_QTY * loss_qty_per
-            # 스토어 가중치(배치) 적용
             weights_batch = weights_batch / weights_batch.mean().clamp_min(1e-6)
             loss = (total_per * weights_batch).mean()
 
@@ -772,7 +732,6 @@ def train_full_and_pack(train_path: str):
 
                     p_buy, qty_log = model(Xn,dw,mn,se,sid,iid,fdw,fmn,fse)
 
-                    # 손실(가중치 동일 적용)
                     mask_weight = WEIGHT_PRELAUNCH + (1.0 - WEIGHT_PRELAUNCH) * fav
                     mask_weight = mask_weight * torch.where(fpause>0.5, torch.as_tensor(WEIGHT_PAUSED, device=device), torch.as_tensor(1.0, device=device))
 
@@ -787,7 +746,6 @@ def train_full_and_pack(train_path: str):
 
                     va_loss += (LAMBDA_ZERO*loss_zero_per + LAMBDA_QTY*loss_qty_per).mean().item() * Xn.size(0)
 
-                    # 예측/정답 (원스케일)
                     q = torch.expm1(qty_log).clamp(min=0)
                     p = p_buy
                     yhat_qp = (q * p).cpu().numpy()
@@ -807,7 +765,6 @@ def train_full_and_pack(train_path: str):
 
             va_loss /= max(len(val_loader.dataset), 1)
 
-            # val_results DF
             all_trues = np.concatenate(all_trues)
             all_preds_q = np.concatenate(all_preds_q)
             all_preds_qp = np.concatenate(all_preds_qp)
@@ -823,7 +780,6 @@ def train_full_and_pack(train_path: str):
                 'pred_qp': all_preds_qp
             })
 
-            # 업장/아이템 가중 sMAPE(보고용)
             def _weighted_smape_from(val_res, use_q=True):
                 pred_col = 'pred_q' if use_q else 'pred_qp'
                 smape_by_item = val_res.groupby(['sid','iid']).apply(
@@ -852,21 +808,19 @@ def train_full_and_pack(train_path: str):
                 best_s = va_smape
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
                 bad = 0
-                best_val_results = val_results.copy()  # 후처리용으로 저장
+                best_val_results = val_results.copy()  
             else:
                 bad += 1
                 if bad >= PATIENCE:
                     print(f"Early stop at epoch {epoch} (best wSMAPE={best_s:.4f})")
                     break
 
-        # ---- 스냅샷 저장: 지정 에폭이면 가중치 백업 ----
         if SNAPSHOT_EPOCH is not None and epoch == SNAPSHOT_EPOCH:
             state_at_snapshot = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
-    # 에폭 종료 후 best 가중치 / 스냅샷 가중치 적용
     if (not TRAIN_FULL) and (best_state is not None):
         model.load_state_dict(best_state)
-        val_results = best_val_results  # best 기준
+        val_results = best_val_results  
 
     if SNAPSHOT_EPOCH is not None:
         if state_at_snapshot is not None:
@@ -880,22 +834,19 @@ def train_full_and_pack(train_path: str):
     # ---------------- Postprocess on Validation ----------------
     post_params = {'theta_eps':{}, 'affine':{}, 'caps':caps_map, 'scores':{}}
     if (not TRAIN_FULL) and (n_val > 0):
-        # val_results -> 후처리 입력 포맷으로 변환
         val_df_post = val_results.copy()
         val_df_post['restaurant'] = val_df_post['sid'].map(id2store)
         val_df_post['item']       = val_df_post['iid'].map(id2item)
-        val_df_post['date']       = np.arange(len(val_df_post))  # 정렬용 dummy
+        val_df_post['date']       = np.arange(len(val_df_post)) 
         val_df_post['A']          = val_df_post['true']
         val_df_post['q']          = val_df_post['pred_q']
-        # 기본 p_eff (클립)
-        val_df_post['p_eff']      = np.clip(val_df_post['pred_qp'] / (val_df_post['pred_q'] + 1e-8), 0.0, 1.0)
-        val_df_post['P']          = val_df_post['q']  # 초기값(q_only)
 
-        # store weights (담하/미라시아 가중)
+        val_df_post['p_eff']      = np.clip(val_df_post['pred_qp'] / (val_df_post['pred_q'] + 1e-8), 0.0, 1.0)
+        val_df_post['P']          = val_df_post['q'] 
+
         store_weights = {id2store.get(damha_id, '담하'): HIGH_WEIGHT,
                          id2store.get(mirasia_id, '미라시아'): HIGH_WEIGHT}
 
-        # (3-A) p 온도보정: 스토어 단위
         stores_all = sorted(val_df_post['restaurant'].unique())
         temp_map = fit_temperature_per_store(val_df_post, stores_all)
         def _calib_p_row(r):
@@ -904,15 +855,12 @@ def train_full_and_pack(train_path: str):
             return _sigmoid(_logit(p)/T)
         val_df_post['p_eff'] = val_df_post.apply(_calib_p_row, axis=1)
 
-        # (3-B) θ/ε 튜닝: store×item 우선, 부족분 store fallback
         val_theta_si, theta_params_si, theta_params_s = tune_theta_eps_per_store_item(
             val_df_post, store_weights=store_weights, min_rows=60
         )
 
-        # 2) affine 보정(스토어 단위)
         val_aff, affine_params, sc_aff = affine_calib_per_store(val_theta_si, store_weights=store_weights)
 
-        # 3) train-only caps 적용
         if caps_map:
             def _cap_row(r):
                 cap = caps_map.get((r['restaurant'], r['item']), None)
@@ -929,8 +877,7 @@ def train_full_and_pack(train_path: str):
         post_params['p_temp']       = temp_map
         post_params['affine']       = affine_params
         post_params['scores']       = {'affine': sc_aff, 'final_cap': sc_final}
-
-    # 아티팩트
+        
     model_kwargs = dict(
         input_size_num=len(features), n_stores=len(store2id), n_items=len(item2id),
         emb_store=emb_store, emb_item=emb_item, emb_dow=4, emb_mon=4, emb_season=3,
@@ -972,8 +919,7 @@ def predict_on_test_and_fill_submission(artifacts, sub_path: str, save_path: str
     mk         = artifacts["model_kwargs"]
     pp         = artifacts.get("post_params", {})
 
-    # 후처리 파라미터
-    theta_eps_si  = pp.get('theta_eps_si', {})  # key: "store|||item"
+    theta_eps_si  = pp.get('theta_eps_si', {}) 
     theta_eps_s   = pp.get('theta_eps_s', {})
     affine        = pp.get('affine', {})
     caps_map      = pp.get('caps', {})
@@ -991,7 +937,7 @@ def predict_on_test_and_fill_submission(artifacts, sub_path: str, save_path: str
     print(f"Test files: {len(test_paths)}개")
 
     for path in test_paths:
-        base = os.path.splitext(os.path.basename(path))[0]   # e.g. TEST_00
+        base = os.path.splitext(os.path.basename(path))[0]  
         dfp = pd.read_csv(path)
 
         if "영업장명_메뉴명" in dfp.columns and (("업장명" not in dfp.columns) or ("메뉴명" not in dfp.columns)):
@@ -1046,17 +992,14 @@ def predict_on_test_and_fill_submission(artifacts, sub_path: str, save_path: str
                 q = np.expm1(qlog.detach().cpu().numpy())[0]; q[q<0]=0
                 p = p_buy.detach().cpu().numpy()[0]
 
-                # 기본 모드
                 if PRED_MODE == "q_only":
                     yhat = q
                 elif PRED_MODE == "qp":
                     yhat = np.clip(q * p, 0, None)
-                else:  # hybrid
+                else: 
                     yhat = np.where(q >= Q_THRESH, q, np.clip(q * p, 0, None))
 
-                # ---- (옵션) 동일 후처리 적용 ----
                 if APPLY_POSTPROC:
-                    # (a) 온도보정 (스토어 단위)
                     p_eff = np.clip(p, 0.0, 1.0)
                     T = float(p_temp_map.get(store, 1.0))
                     if T != 1.0:
@@ -1064,7 +1007,6 @@ def predict_on_test_and_fill_submission(artifacts, sub_path: str, save_path: str
 
                     q_eff = q.copy()
 
-                    # (b) θ/ε: store×item → store fallback
                     key_si = f"{store}|||{item}"
                     te = theta_eps_si.get(key_si, None)
                     if te is None:
@@ -1077,18 +1019,15 @@ def predict_on_test_and_fill_submission(artifacts, sub_path: str, save_path: str
                     else:
                         yhat = q_eff
 
-                    # (c) affine(스토어)
                     af = affine.get(store, None)
                     if af is not None:
                         a, b = af['alpha'], af['beta']
                         yhat = np.maximum(0.0, a*yhat + b)
 
-                    # (d) cap(스토어×아이템)
                     cap_val = caps_map.get((store, item), None)
                     if cap_val is not None:
                         yhat = np.minimum(yhat, cap_val)
 
-            # 제출 format
             col_name = f"{store}_{item}"
             if col_name not in item_col_set:
                 continue
@@ -1113,7 +1052,7 @@ def predict_on_test_and_fill_submission(artifacts, sub_path: str, save_path: str
 TRAIN_PATH = './data/pivot_holiday_train.csv'
 TEST_GLOB = './data/test/TEST_*.csv'
 SAMPLE_SUB_PATH = './data/sample_submission.csv'
-SAVE_PATH = './prediction/new_final_trial2.csv'
+SAVE_PATH = './prediction/prediction.csv'
 
 SEQ_LEN = 28 
 H       = 7
@@ -1131,27 +1070,23 @@ FOCAL_ALPHA = 0.75
 LAMBDA_ZERO = 0.3
 LAMBDA_QTY  = 1.0
 
-# 후처리 세부
-CAP_Q = 0.95          # 캡 분위수
-APPLY_POSTPROC = True # 테스트 예측에도 후처리 적용 여부
+CAP_Q = 0.95        
+APPLY_POSTPROC = True
 
-# 가용성 가중치
-WEIGHT_PRELAUNCH = 0.0  # 출시 전 손실 가중치(완전 제외)
-WEIGHT_PAUSED    = 0.5  # 일시중단 시 손실 가중치
+WEIGHT_PRELAUNCH = 0.0  
+WEIGHT_PAUSED    = 0.5 
 
 SEED = 42
 
-# ---------- 학습/검증 토글 & 스냅샷 ----------
-TRAIN_FULL   = True   # 요청대로 True
+TRAIN_FULL   = True  
 VAL_DAYS     = 56
 PATIENCE     = 8
-SNAPSHOT_EPOCH = 23   # <- 이 에폭의 가중치로 최종 예측
+SNAPSHOT_EPOCH = 23   
 
-EARLYSTOP_ON = "q_only"     # ["q_only", "qp", "both_min"]
+EARLYSTOP_ON = "q_only"     
 
-# 추론(제출) 시 출력 모드
-PRED_MODE    = "q_only"     # ["q_only", "qp", "hybrid"]
-Q_THRESH     = 0.3          # hybrid에서 사용
+PRED_MODE    = "q_only"   
+Q_THRESH     = 0.3         
 
 # ---------- Main ----------
 if __name__ == "__main__":
