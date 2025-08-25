@@ -47,7 +47,7 @@ Since the original dataset contained limited features for training, we created a
 #### Lightweight Attention Module
 - Allows model to focus on relevant days when forecasting.
 
-#### Two-ㄴtage prediction
+#### Two-Stage prediction
 - out_zero: logits for purchase probability.
 - out_qty: regression for positive demand.
 
@@ -64,7 +64,7 @@ $$
 #### Loss Function
 - To align with the competition’s evaluation metric, we designed a custom loss function.
 - Weighted per sample, with higher importance given to specific restaurants (e.g., 담하, 미라시아).
-- Total Loss = λ_zero * FocalBCE(p, target>0) + λ_qty * SmoothL1(q, log1p(y))
+- $ \text{Total Loss} = \lambda_{\text{zero}} \cdot \text{FocalBCE}(p, \mathbb{1}_{y>0}) + \lambda_{\text{qty}} \cdot \text{SmoothL1}(q, \log(1+y)) $
 
 #### Validation & Early Stopping
 - For validation, we split the last *n* days from the training set.
