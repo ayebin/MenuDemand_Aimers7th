@@ -62,9 +62,11 @@ $$
 - Zero-sales exclusion: Days with actual sales = 0 are excluded from the calculation.
 
 #### Loss Function
+$$
+\text{Total Loss} = \lambda_{\text{zero}} \cdot \text{FocalBCE}(p, \mathbb{1}_{y>0}) + \lambda_{\text{qty}} \cdot \text{SmoothL1}(q, \log(1+y))
+$$
 - To align with the competition’s evaluation metric, we designed a custom loss function.
 - Weighted per sample, with higher importance given to specific restaurants (e.g., 담하, 미라시아).
-- $ \text{Total Loss} = \lambda_{\text{zero}} \cdot \text{FocalBCE}(p, \mathbb{1}_{y>0}) + \lambda_{\text{qty}} \cdot \text{SmoothL1}(q, \log(1+y)) $
 
 #### Validation & Early Stopping
 - For validation, we split the last *n* days from the training set.
