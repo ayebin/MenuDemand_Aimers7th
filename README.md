@@ -63,7 +63,7 @@ $$
 
 #### Loss Function
 $$
-Total_Loss = \lambda_{zero} \cdot FocalBCE(p, \mathbf{1}_{y>0}) + \lambda_{qty} \cdot SmoothL1(q, \log(1+y))
+Total\_Loss = \lambda_{zero} \cdot FocalBCE(p, 1_{y>0}) + \lambda_{qty} \cdot SmoothL1(q, \log(1+y))
 $$
 - To align with the competition’s evaluation metric, we designed a custom loss function.
 - Weighted per sample, with higher importance given to specific restaurants (e.g., 담하, 미라시아).
